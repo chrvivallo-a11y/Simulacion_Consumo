@@ -1,6 +1,6 @@
-streamlit==1.32.0
-pandas==2.2.1
-requests==2.31.0
-workalendar==17.0.0
-python-dateutil==2.9.0
-numpy-financial==1.0.0
+streamlit
+pandas
+requests
+workalendar
+python-dateutil
+numpy-financial
