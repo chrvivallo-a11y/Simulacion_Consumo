@@ -11,10 +11,10 @@ DATA_CACHE = {}
 
 # --- RESTRICCIONES DE NEGOCIO ---
 TABLA_TMC = {
-    "hasta_50_uf": 3.4400,
-    "hasta_200_uf": 2.85666,
-    "hasta_5000_uf": 2.5350,
-    "mas_de_5000_uf": 0.8200
+    "hasta_50_uf": 3.3500,
+    "hasta_200_uf": 2.7666,
+    "hasta_5000_uf": 2.4000,
+    "mas_de_5000_uf": 0.8300
 }
 
 def obtener_tmc(monto_uf):
@@ -89,13 +89,46 @@ def obtener_valor_matriz(tipo, fila_val, monto_bruto, es_plazo=False):
 def con_simulacion_consumo(in_fecha_curse, in_primer_venc, in_monto_liquido, in_cuotas, in_tipo_cliente, in_banca, in_perfil, in_canal, in_seguro, in_valor_uf):
     if not DATA_CACHE: cargar_datos_csv()
     
-    # 1. Monto Bruto (Impuesto de Timbres y Estampillas LTE + Gasto Notarial)
+    # 0. Monto Bruto (Impuesto de Timbres y Estampillas LTE + Gasto Notarial fijo)
     t_imp = min(in_cuotas * 0.066, 0.8)
     monto_bruto = math.ceil((in_monto_liquido + 2640) / (1.0 - t_imp/100.0))
 
-    # 2. CF - Búsqueda Mensual y Anualización
-    cf_anual_aplicado = 5.4 
-    cf_mensual_viz = 5.4 / 12.0
+
+    # ========================================================================
+    # PASO 1: Definir Spread Base Inicial (Anualizado según tabla)
+    # ========================================================================
+    tipo_b = 'normal'
+    if in_tipo_cliente == 'MORA_BLANDA': tipo_b = 'mora_blanda'
+    elif in_tipo_cliente == 'NUEVO': tipo_b = 'nuevo'
+    
+    spread_base_anual = obtener_valor_matriz(tipo_b, in_cuotas, monto_bruto, True)
+    
+    
+    # ========================================================================
+    # PASO 2: Aplicar Descuentos (Se suma el valor que viene en la tabla)
+    # ========================================================================
+    d_banca_anual = obtener_valor_matriz('banca', in_banca, monto_bruto)
+    d_perfil_anual = obtener_valor_matriz('perfil', in_perfil, monto_bruto)
+    
+    d_seguro_anual = 0.0
+    if in_seguro == 'S01': d_seguro_anual = obtener_valor_matriz('seguros_s01', in_cuotas, monto_bruto, True)
+    elif in_seguro == 'S02': d_seguro_anual = obtener_valor_matriz('seguros_s02', in_cuotas, monto_bruto, True)
+    
+    # Suma directa de las componentes (los descuentos traen signo negativo de origen)
+    spread_subtotal_anual = spread_base_anual + d_banca_anual + d_perfil_anual + d_seguro_anual
+    
+    # Descuento Canal es porcentual sobre lo que llevamos de spread
+    p_can = obtener_valor_matriz('canal', in_canal, monto_bruto)
+    spread_final_anual = spread_subtotal_anual * (1.0 - p_can/100.0)
+    
+    # Llevamos el Spread Final a base MENSUAL
+    spread_final_mensual = spread_final_anual / 12.0
+
+
+    # ========================================================================
+    # PASO 3: Sumar Costo de Fondo (Búsqueda de CF Mensual)
+    # ========================================================================
+    cf_mensual = 5.4 / 12.0 # Default fallback
     try:
         df_cf = DATA_CACHE['cf']
         per_max = df_cf['periodo'].max()
@@ -104,50 +137,31 @@ def con_simulacion_consumo(in_fecha_curse, in_primer_venc, in_monto_liquido, in_
         df_r = df_r.sort_values(by='plazo_desde').reset_index(drop=True)
         f_idx = df_r[(df_r['plazo_desde'] <= in_cuotas) & (df_r['plazo_hasta'] >= in_cuotas)].index
         if not f_idx.empty:
-            cf_mensual_viz = df_r.loc[f_idx[0], 'cf']
-            cf_anual_aplicado = cf_mensual_viz * 12.0
+            cf_mensual = df_r.loc[f_idx[0], 'cf']
     except: pass
 
-    # 3. CASCADA DE PRICING (MODIFICADA: Descuentos sólo sobre el Spread)
-    tipo_b = 'normal'
-    if in_tipo_cliente == 'MORA_BLANDA': tipo_b = 'mora_blanda'
-    elif in_tipo_cliente == 'NUEVO': tipo_b = 'nuevo'
-    
-    # I. Spread Inicial
-    sp_base = obtener_valor_matriz(tipo_b, in_cuotas, monto_bruto, True)
-    
-    # II. Descuentos en Puntos (Aditivos)
-    d_banca = obtener_valor_matriz('banca', in_banca, monto_bruto)
-    d_perfil = obtener_valor_matriz('perfil', in_perfil, monto_bruto)
-    
-    d_seguro = 0.0
-    if in_seguro == 'S01': d_seguro = obtener_valor_matriz('seguros_s01', in_cuotas, monto_bruto, True)
-    elif in_seguro == 'S02': d_seguro = obtener_valor_matriz('seguros_s02', in_cuotas, monto_bruto, True)
-    
-    # Spread Subtotal (Aplicación de puntos)
-    spread_subtotal = sp_base + d_banca + d_perfil + d_seguro
-    
-    # III. Descuento por Canal (Porcentual) -> Aplicado al Spread Subtotal
-    p_can = obtener_valor_matriz('canal', in_canal, monto_bruto)
-    spread_final = spread_subtotal * (1.0 - p_can/100.0)
-    
-    # IV. Obtención de Tasa Anual y Mensual (Spread Final + Costo de Fondo)
-    tasa_final_anual_calc = spread_final + cf_anual_aplicado
-    tasa_mensual_calc = tasa_final_anual_calc / 12.0
 
-    # 4. RESTRICCIONES DE NEGOCIO (Piso y TMC sobre la Tasa Mensual)
+    # ========================================================================
+    # PASO 4: Obtener Tasa Mensual
+    # ========================================================================
+    tasa_mensual_pura = spread_final_mensual + cf_mensual
+
+
+    # ========================================================================
+    # PASO EXTRA: Restricciones de Negocio (Tasa Piso y Tope TMC)
+    # ========================================================================
     tasa_piso = obtener_tasa_minima(in_perfil, in_banca)
     monto_bruto_uf = monto_bruto / in_valor_uf if in_valor_uf > 0 else 0
     tmc_limite = obtener_tmc(monto_bruto_uf)
         
-    tasa_aplicada = max(tasa_mensual_calc, tasa_piso) 
+    tasa_aplicada = max(tasa_mensual_pura, tasa_piso) 
     tasa_aplicada = min(tasa_aplicada, tmc_limite) 
     
-    # 5. Cálculo de Cuota con Desfase
+    # Cálculo de Cuota con Desfase
     f_desfase = {12: 1.0008, 24: 1.0020, 36: 1.0025, 48: 1.0030, 60: 1.0036}.get(in_cuotas, 1.0021)
     valor_cuota = math.ceil(npf.pmt(tasa_aplicada/100.0, in_cuotas, -monto_bruto) * f_desfase)
 
-    # 6. Cálculo de los 2 CAEs
+    # Cálculo de los 2 CAEs
     flujo = [in_monto_liquido] + [-valor_cuota]*in_cuotas
     tir = npf.irr(flujo)
     cae_sernac = (tir * 12.0 * 100.0) if not math.isnan(tir) else 0.0
@@ -162,12 +176,14 @@ def con_simulacion_consumo(in_fecha_curse, in_primer_venc, in_monto_liquido, in_
         "piso_aplicado": tasa_piso,
         "tmc_aplicada": tmc_limite,
         "detalle_cascada": [
-            {"Concepto": f"1. Spread Base ({tipo_b.upper()})", "Valor Mensual": sp_base / 12.0},
-            {"Concepto": f"2. Desc. Banca ({in_banca})", "Valor Mensual": (sp_base + d_banca) / 12.0},
-            {"Concepto": f"3. Desc. Perfil ({in_perfil})", "Valor Mensual": (sp_base + d_banca + d_perfil) / 12.0},
-            {"Concepto": f"4. Desc. Seguros ({in_seguro})", "Valor Mensual": spread_subtotal / 12.0},
-            {"Concepto": f"5. Spread Final (Tras desc. Canal {p_can}%)", "Valor Mensual": spread_final / 12.0},
-            {"Concepto": f"6. Suma Costo Fondo (CF: {cf_mensual_viz:.4f}%)", "Valor Mensual": tasa_final_anual_calc / 12.0},
-            {"Concepto": f"🛡️ TASA FINAL (Piso {tasa_piso:.2f}% | TMC {tmc_limite:.2f}%)", "Valor Mensual": tasa_aplicada}
+            {"Paso": "1", "Concepto": "Spread Base Inicial (Anual)", "Valor": f"{spread_base_anual:.4f}%"},
+            {"Paso": "2", "Concepto": f"Sumar Ajuste Banca ({in_banca})", "Valor": f"{d_banca_anual:+.4f}%"},
+            {"Paso": "2", "Concepto": f"Sumar Ajuste Perfil ({in_perfil})", "Valor": f"{d_perfil_anual:+.4f}%"},
+            {"Paso": "2", "Concepto": f"Sumar Ajuste Seguros ({in_seguro})", "Valor": f"{d_seguro_anual:+.4f}%"},
+            {"Paso": "2", "Concepto": f"Descuento de Canal ({p_can}%)", "Valor": f"-{spread_subtotal_anual * (p_can/100.0):.4f}%"},
+            {"Paso": "-", "Concepto": "▶️ Spread Final (Base Mensual)", "Valor": f"{spread_final_mensual:.4f}%"},
+            {"Paso": "3", "Concepto": "Sumar Costo de Fondo (Mensual)", "Valor": f"{cf_mensual:+.4f}%"},
+            {"Paso": "4", "Concepto": "Tasa Mensual Pura Calculada", "Valor": f"{tasa_mensual_pura:.4f}%"},
+            {"Paso": "🛡️", "Concepto": f"Tasa Final Aplicada (Piso {tasa_piso:.2f}% | TMC {tmc_limite:.2f}%)", "Valor": f"{tasa_aplicada:.4f}%"}
         ]
     }
