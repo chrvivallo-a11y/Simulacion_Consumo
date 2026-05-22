@@ -11,10 +11,10 @@ DATA_CACHE = {}
 
 # --- RESTRICCIONES DE NEGOCIO ---
 TABLA_TMC = {
-    "hasta_50_uf": 3.3500,
-    "hasta_200_uf": 2.7666,
-    "hasta_5000_uf": 2.4000,
-    "mas_de_5000_uf": 0.8300
+    "hasta_50_uf": 3.4400,
+    "hasta_200_uf": 2.85666,
+    "hasta_5000_uf": 2.5350,
+    "mas_de_5000_uf": 0.8200
 }
 
 def obtener_tmc(monto_uf):
