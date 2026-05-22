@@ -4,7 +4,7 @@ import time
 from datetime import date
 from dateutil.relativedelta import relativedelta
 
-# Importación desde el motor consumo
+# Importación desde el motor de consumo calibrado
 from motor_simulacion_consumo import con_simulacion_consumo 
 
 # ==============================================================================
@@ -16,6 +16,7 @@ st.title("🏦 Simulador Créditos de Consumo - BCI")
 st.markdown("""
 **Estado del Motor:** - Cascada de Pricing Consumo Mensualizada mediante CSVs.
 - **🛡️ Restricciones:** Tasa Piso, TMC dinámico según UF, Factor de Desfase en Cuota y Holgura de 0.30% en CAE interno activadas.
+- **⚙️ Algoritmo:** Cálculo aislado del Spread Comercial antes de la incorporación del Costo de Fondo.
 """)
 
 tab_individual, tab_masivo = st.tabs(["👤 Simulación Individual", "📁 Simulación Masiva (Batch)"])
@@ -45,16 +46,12 @@ with tab_individual:
     with col3:
         f_pago = st.date_input("Fecha Primer Pago", value=f_curse + relativedelta(months=1))
         canal_ind = st.selectbox("Canal de Venta", ["CCDD", "ASISTIDO"])
-        seguro_ind = st.selectbox("Seguro Cruzado", ["SIN_SEGURO", "S01 (Desgravamen)", "S02 (Full)"])
+        seguro_ind = st.selectbox("Seguro Cruzado", ["SIN_SEGURO", "S01", "S02"])
 
     st.markdown("---")
     
     if st.button("🚀 Calcular Simulación Consumo", type="primary", use_container_width=True):
         try:
-            seg_clean = "SIN_SEGURO"
-            if "S01" in seguro_ind: seg_clean = "S01"
-            elif "S02" in seguro_ind: seg_clean = "S02"
-
             res = con_simulacion_consumo(
                 in_fecha_curse=f_curse,
                 in_primer_venc=f_pago,
@@ -64,7 +61,7 @@ with tab_individual:
                 in_banca=banca,
                 in_perfil=perfil,
                 in_canal=canal_ind,
-                in_seguro=seg_clean,
+                in_seguro=seguro_ind,
                 in_valor_uf=val_uf
             )
             
@@ -76,11 +73,11 @@ with tab_individual:
             r4.metric("CAE Sernac", f"{res['cae_sernac']:.2f}%")
             r5.metric("CAE 2 (+0.30%)", f"{res['cae_interno']:.2f}%")
 
-            # --- CASCADA VISUAL DE DOS COLUMNAS ---
-            st.subheader("🪜 Detalle de Cascada (Pricing Mensual)")
+            # --- CASCADA VISUAL POR PASOS ---
+            st.subheader("🪜 Detalle de Cascada de Precios")
             df_c = pd.DataFrame(res["detalle_cascada"])
-            df_c["Tasa Paso (Mes)"] = df_c["Valor Mensual"].apply(lambda x: f"**{x:.4f}%**")
-            st.table(df_c[["Concepto", "Tasa Paso (Mes)"]])
+            df_c["Valor"] = df_c["Valor"].apply(lambda x: f"**{x}**")
+            st.table(df_c)
 
         except Exception as e:
             st.error(f"Error en el cálculo: {e}")
@@ -94,7 +91,7 @@ with tab_masivo:
     with st.expander("ℹ️ Instrucciones y Formato del Archivo CSV", expanded=False):
         diccionario = pd.DataFrame({
             "Nombre Columna": ["rut", "fecha_curse", "fecha_pago", "monto", "plazo", "tipo_cliente", "banca", "perfil", "canal", "seguro"],
-            "Descripción": ["RUT del cliente", "Fecha de otorgamiento", "Fecha primer venc.", "Monto Líquido", "Cantidad de cuotas", "Base spread spread", "Segmento o Banca", "Perfil de Riesgo", "Canal de curse", "Seguro asociado"],
+            "Descripción": ["RUT del cliente", "Fecha de otorgamiento", "Fecha primer venc.", "Monto Líquido", "Cantidad de cuotas", "Base spread comercial", "Banca o Segmento", "Perfil de Riesgo", "Canal de curse", "Seguro asociado"],
             "Valores Permitidos": ["Texto (ej: 12345678-9)", "YYYY-MM-DD", "YYYY-MM-DD", "Entero", "Entero", "NORMAL, MORA_BLANDA, NUEVO", "PP, PBP, PRE", "P1 al P11", "CCDD o ASISTIDO", "SIN_SEGURO, S01, S02"]
         })
         st.table(diccionario)
@@ -139,9 +136,10 @@ with tab_masivo:
                                 in_perfil=str(row['perfil']).upper().strip(), 
                                 in_canal=str(row['canal']).upper().strip(), 
                                 in_seguro=str(row['seguro']).upper().strip(),
-                                in_valor_uf=38000.0 # Se asume una UF estándar para evaluar el lote
+                                in_valor_uf=38000.0 # Se asume una UF promedio de mercado para evaluar el lote completo
                             )
                             
+                            # Al usar row.to_dict() nos aseguramos de que el RUT y datos iniciales viajen intactos
                             fila = row.to_dict()
                             fila.update({
                                 "monto_bruto_res": r["monto_bruto"], 
