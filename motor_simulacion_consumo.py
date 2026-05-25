@@ -93,7 +93,6 @@ def con_simulacion_consumo(in_fecha_curse, in_primer_venc, in_monto_liquido, in_
     t_imp = min(in_cuotas * 0.066, 0.8)
     monto_bruto = math.ceil((in_monto_liquido + 2640) / (1.0 - t_imp/100.0))
 
-
     # ========================================================================
     # PASO 1: Definir Spread Base Inicial (Anualizado según tabla)
     # ========================================================================
@@ -103,27 +102,30 @@ def con_simulacion_consumo(in_fecha_curse, in_primer_venc, in_monto_liquido, in_
     
     spread_base_anual = obtener_valor_matriz(tipo_b, in_cuotas, monto_bruto, True)
     
+    # ========================================================================
+    # PASO 2: Aplicar Descuentos en ORDEN ESTRICTO (Suma algebraica)
+    # ========================================================================
     
-    # ========================================================================
-    # PASO 2: Aplicar Descuentos (Se suma el valor que viene en la tabla)
-    # ========================================================================
+    # 2.1. Descuento por Banca
     d_banca_anual = obtener_valor_matriz('banca', in_banca, monto_bruto)
-    d_perfil_anual = obtener_valor_matriz('perfil', in_perfil, monto_bruto)
+    spread_paso_banca = spread_base_anual + d_banca_anual
     
+    # 2.2. Descuento por Cruce de Seguros (S01 o S02)
     d_seguro_anual = 0.0
     if in_seguro == 'S01': d_seguro_anual = obtener_valor_matriz('seguros_s01', in_cuotas, monto_bruto, True)
     elif in_seguro == 'S02': d_seguro_anual = obtener_valor_matriz('seguros_s02', in_cuotas, monto_bruto, True)
+    spread_paso_seguros = spread_paso_banca + d_seguro_anual
     
-    # Suma directa de las componentes (los descuentos traen signo negativo de origen)
-    spread_subtotal_anual = spread_base_anual + d_banca_anual + d_perfil_anual + d_seguro_anual
+    # 2.3. Descuento por Perfil de Riesgo
+    d_perfil_anual = obtener_valor_matriz('perfil', in_perfil, monto_bruto)
+    spread_paso_perfiles = spread_paso_seguros + d_perfil_anual
     
-    # Descuento Canal es porcentual sobre lo que llevamos de spread
+    # 2.4. Descuento por Canal de Curse (% porcentual aplicado al spread acumulado)
     p_can = obtener_valor_matriz('canal', in_canal, monto_bruto)
-    spread_final_anual = spread_subtotal_anual * (1.0 - p_can/100.0)
+    spread_final_anual = spread_paso_perfiles * (1.0 - p_can/100.0)
     
-    # Llevamos el Spread Final a base MENSUAL
+    # Llevamos el Spread Final Anual a base MENSUAL
     spread_final_mensual = spread_final_anual / 12.0
-
 
     # ========================================================================
     # PASO 3: Sumar Costo de Fondo (Búsqueda de CF Mensual)
@@ -140,15 +142,13 @@ def con_simulacion_consumo(in_fecha_curse, in_primer_venc, in_monto_liquido, in_
             cf_mensual = df_r.loc[f_idx[0], 'cf']
     except: pass
 
-
     # ========================================================================
     # PASO 4: Obtener Tasa Mensual
     # ========================================================================
     tasa_mensual_pura = spread_final_mensual + cf_mensual
 
-
     # ========================================================================
-    # PASO EXTRA: Restricciones de Negocio (Tasa Piso y Tope TMC)
+    # RESTRICCIONES DE NEGOCIO (Tasa Piso y Tope TMC)
     # ========================================================================
     tasa_piso = obtener_tasa_minima(in_perfil, in_banca)
     monto_bruto_uf = monto_bruto / in_valor_uf if in_valor_uf > 0 else 0
@@ -161,7 +161,7 @@ def con_simulacion_consumo(in_fecha_curse, in_primer_venc, in_monto_liquido, in_
     f_desfase = {12: 1.0008, 24: 1.0020, 36: 1.0025, 48: 1.0030, 60: 1.0036}.get(in_cuotas, 1.0021)
     valor_cuota = math.ceil(npf.pmt(tasa_aplicada/100.0, in_cuotas, -monto_bruto) * f_desfase)
 
-    # Cálculo de los 2 CAEs
+    # Cálculo de los CAEs
     flujo = [in_monto_liquido] + [-valor_cuota]*in_cuotas
     tir = npf.irr(flujo)
     cae_sernac = (tir * 12.0 * 100.0) if not math.isnan(tir) else 0.0
@@ -175,15 +175,27 @@ def con_simulacion_consumo(in_fecha_curse, in_primer_venc, in_monto_liquido, in_
         "cae_interno": cae_interno,
         "piso_aplicado": tasa_piso,
         "tmc_aplicada": tmc_limite,
+        
+        # ---> VARIABLES DE DESCUENTO (Para exportación masiva) <---
+        "desc_banca_anual": d_banca_anual,
+        "desc_seguro_anual": d_seguro_anual,
+        "desc_perfil_anual": d_perfil_anual,
+        "desc_canal_anual": -(spread_paso_perfiles * (p_can/100.0)),
+        # -----------------------------------------------------------
+
         "detalle_cascada": [
-            {"Paso": "1", "Concepto": "Spread Base Inicial (Anual)", "Valor": f"{spread_base_anual:.4f}%"},
-            {"Paso": "2", "Concepto": f"Sumar Ajuste Banca ({in_banca})", "Valor": f"{d_banca_anual:+.4f}%"},
-            {"Paso": "2", "Concepto": f"Sumar Ajuste Perfil ({in_perfil})", "Valor": f"{d_perfil_anual:+.4f}%"},
-            {"Paso": "2", "Concepto": f"Sumar Ajuste Seguros ({in_seguro})", "Valor": f"{d_seguro_anual:+.4f}%"},
-            {"Paso": "2", "Concepto": f"Descuento de Canal ({p_can}%)", "Valor": f"-{spread_subtotal_anual * (p_can/100.0):.4f}%"},
-            {"Paso": "-", "Concepto": "▶️ Spread Final (Base Mensual)", "Valor": f"{spread_final_mensual:.4f}%"},
-            {"Paso": "3", "Concepto": "Sumar Costo de Fondo (Mensual)", "Valor": f"{cf_mensual:+.4f}%"},
+            {"Paso": "1", "Concepto": f"Spread Base Inicial ({tipo_b.upper()}) - Anual", "Valor": f"{spread_base_anual:.4f}%"},
+            {"Paso": "2.1", "Concepto": f"Sumar Ajuste por Banca ({in_banca})", "Valor": f"{d_banca_anual:+.4f}%"},
+            {"Paso": "-", "Concepto": "  ↳ Subtotal Spread tras Banca", "Valor": f"{spread_paso_banca:.4f}%"},
+            {"Paso": "2.2", "Concepto": f"Sumar Ajuste por Seguros ({in_seguro})", "Valor": f"{d_seguro_anual:+.4f}%"},
+            {"Paso": "-", "Concepto": "  ↳ Subtotal Spread tras Seguros", "Valor": f"{spread_paso_seguros:.4f}%"},
+            {"Paso": "2.3", "Concepto": f"Sumar Ajuste por Perfil ({in_perfil})", "Valor": f"{d_perfil_anual:+.4f}%"},
+            {"Paso": "-", "Concepto": "  ↳ Subtotal Spread tras Perfil", "Valor": f"{spread_paso_perfiles:.4f}%"},
+            {"Paso": "2.4", "Concepto": f"Descuento Porcentual Canal ({p_can}%)", "Valor": f"-{spread_paso_perfiles * (p_can/100.0):.4f}%"},
+            {"Paso": "-", "Concepto": "▶️ SPREAD FINAL COMERCIAL (Anual)", "Valor": f"{spread_final_anual:.4f}%"},
+            {"Paso": "-", "Concepto": "▶️ SPREAD FINAL COMERCIAL (Mensual)", "Valor": f"{spread_final_mensual:.4f}%"},
+            {"Paso": "3", "Concepto": "Sumar Costo de Fondo (CF Mensual)", "Valor": f"{cf_mensual:+.4f}%"},
             {"Paso": "4", "Concepto": "Tasa Mensual Pura Calculada", "Valor": f"{tasa_mensual_pura:.4f}%"},
-            {"Paso": "🛡️", "Concepto": f"Tasa Final Aplicada (Piso {tasa_piso:.2f}% | TMC {tmc_limite:.2f}%)", "Valor": f"{tasa_aplicada:.4f}%"}
+            {"Paso": "🛡️", "Concepto": f"TASA FINAL APLICADA (Límites: Piso {tasa_piso:.2f}% | TMC {tmc_limite:.2f}%)", "Valor": f"{tasa_aplicada:.4f}%"}
         ]
     }
