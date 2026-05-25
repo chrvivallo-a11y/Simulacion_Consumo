@@ -16,7 +16,7 @@ st.title("🏦 Simulador Créditos de Consumo - BCI")
 st.markdown("""
 **Estado del Motor:** - Cascada de Pricing Consumo Mensualizada mediante CSVs.
 - **🛡️ Restricciones:** Tasa Piso, TMC dinámico según UF, Factor de Desfase en Cuota y Holgura de 0.30% en CAE interno activadas.
-- **⚙️ Algoritmo:** Cálculo aislado del Spread Comercial antes de la incorporación del Costo de Fondo.
+- **⚙️ Algoritmo:** Cascada de descuentos ordenada estrictamente (**Banca ➔ Seguros ➔ Perfil ➔ Canal**) sobre el Spread, previo al Costo de Fondo.
 """)
 
 tab_individual, tab_masivo = st.tabs(["👤 Simulación Individual", "📁 Simulación Masiva (Batch)"])
@@ -27,7 +27,6 @@ tab_individual, tab_masivo = st.tabs(["👤 Simulación Individual", "📁 Simul
 with tab_individual:
     st.header("1. Datos de la Operación")
     
-    # Entrada de UF requerida para calcular la TMC exacta en tiempo real
     val_uf = st.number_input("Valor UF Hoy ($)", value=38000.0, step=10.0, format="%.1f")
     st.markdown("---")
     
@@ -74,7 +73,7 @@ with tab_individual:
             r5.metric("CAE 2 (+0.30%)", f"{res['cae_interno']:.2f}%")
 
             # --- CASCADA VISUAL POR PASOS ---
-            st.subheader("🪜 Detalle de Cascada de Precios")
+            st.subheader("🪜 Detalle de Cascada de Precios (Construcción del Spread)")
             df_c = pd.DataFrame(res["detalle_cascada"])
             df_c["Valor"] = df_c["Valor"].apply(lambda x: f"**{x}**")
             st.table(df_c)
@@ -136,10 +135,10 @@ with tab_masivo:
                                 in_perfil=str(row['perfil']).upper().strip(), 
                                 in_canal=str(row['canal']).upper().strip(), 
                                 in_seguro=str(row['seguro']).upper().strip(),
-                                in_valor_uf=38000.0 # Se asume una UF promedio de mercado para evaluar el lote completo
+                                in_valor_uf=38000.0 # UF estándar para evaluar el lote si no se extrae de otra parte
                             )
                             
-                            # Al usar row.to_dict() nos aseguramos de que el RUT y datos iniciales viajen intactos
+                            # Al usar row.to_dict() aseguramos que el RUT y datos originales viajen intactos
                             fila = row.to_dict()
                             fila.update({
                                 "monto_bruto_res": r["monto_bruto"], 
@@ -148,7 +147,12 @@ with tab_masivo:
                                 "cae_sernac_res": r["cae_sernac"],
                                 "cae_interno_res": r["cae_interno"],
                                 "tasa_piso_res": r["piso_aplicado"],
-                                "tmc_tope_res": r["tmc_aplicada"]
+                                "tmc_tope_res": r["tmc_aplicada"],
+                                # --- SE AGREGAN LAS COLUMNAS DE DESCUENTOS PARA ANÁLISIS ---
+                                "desc_banca_res": r["desc_banca_anual"],
+                                "desc_seguro_res": r["desc_seguro_anual"],
+                                "desc_perfil_res": r["desc_perfil_anual"],
+                                "desc_canal_res": r["desc_canal_anual"]
                             })
                             results.append(fila)
                         except Exception as fila_err:
